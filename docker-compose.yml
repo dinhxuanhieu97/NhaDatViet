@@ -1,0 +1,155 @@
+# Môi trường phát triển cho dự án BDS (cổng thông tin bất động sản).
+# Chạy: docker compose up -d --build
+#   - bds-web  → http://localhost:3000
+#   - bds-api  → http://localhost:8000
+#   - Mailpit  → http://localhost:8025
+
+services:
+  bds-nginx:
+    image: nginx:1.27-alpine
+    container_name: bds-nginx
+    ports:
+      - '8000:80'
+    volumes:
+      - ./bds-api:/var/www/bds-api
+      - ./docker/nginx/bds-api.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - bds-api-php
+    networks: [bds-network]
+
+  bds-api-php:
+    build:
+      context: ./docker/php
+      dockerfile: Dockerfile
+    container_name: bds-api-php
+    working_dir: /var/www/bds-api
+    volumes:
+      - ./bds-api:/var/www/bds-api
+    environment:
+      DB_CONNECTION: mysql
+      DB_HOST: bds-mysql
+      DB_PORT: 3306
+      DB_DATABASE: bds_db
+      DB_USERNAME: bds
+      DB_PASSWORD: secret
+      REDIS_HOST: bds-redis
+      CACHE_STORE: redis
+      QUEUE_CONNECTION: redis
+      SESSION_DRIVER: redis
+      MAIL_MAILER: smtp
+      MAIL_HOST: bds-mailpit
+      MAIL_PORT: 1025
+    depends_on:
+      bds-mysql:
+        condition: service_healthy
+      bds-redis:
+        condition: service_started
+    networks: [bds-network]
+
+  # Worker xử lý ảnh (resize, WebP, watermark) và gửi email thông báo duyệt tin.
+  bds-api-queue:
+    build:
+      context: ./docker/php
+      dockerfile: Dockerfile
+    container_name: bds-api-queue
+    working_dir: /var/www/bds-api
+    command: php artisan queue:work redis --sleep=3 --tries=3 --max-time=3600
+    restart: unless-stopped
+    volumes:
+      - ./bds-api:/var/www/bds-api
+    environment:
+      DB_CONNECTION: mysql
+      DB_HOST: bds-mysql
+      DB_DATABASE: bds_db
+      DB_USERNAME: bds
+      DB_PASSWORD: secret
+      REDIS_HOST: bds-redis
+      QUEUE_CONNECTION: redis
+    depends_on:
+      bds-mysql:
+        condition: service_healthy
+      bds-redis:
+        condition: service_started
+    networks: [bds-network]
+
+  # Scheduler: hết hạn tin đăng, dọn token.
+  bds-api-scheduler:
+    build:
+      context: ./docker/php
+      dockerfile: Dockerfile
+    container_name: bds-api-scheduler
+    working_dir: /var/www/bds-api
+    command: php artisan schedule:work
+    restart: unless-stopped
+    volumes:
+      - ./bds-api:/var/www/bds-api
+    environment:
+      DB_CONNECTION: mysql
+      DB_HOST: bds-mysql
+      DB_DATABASE: bds_db
+      DB_USERNAME: bds
+      DB_PASSWORD: secret
+      REDIS_HOST: bds-redis
+    depends_on:
+      bds-mysql:
+        condition: service_healthy
+    networks: [bds-network]
+
+  bds-web:
+    build:
+      context: ./bds-web
+      dockerfile: Dockerfile
+    container_name: bds-web
+    ports:
+      - '3000:3000'
+    environment:
+      NEXT_PUBLIC_BDS_API_URL: http://localhost:8000/api/v1
+      NEXT_PUBLIC_BDS_SITE_URL: http://localhost:3000
+    depends_on:
+      - bds-nginx
+    networks: [bds-network]
+
+  bds-mysql:
+    image: mysql:8.0
+    container_name: bds-mysql
+    ports:
+      - '3306:3306'
+    environment:
+      MYSQL_DATABASE: bds_db
+      MYSQL_USER: bds
+      MYSQL_PASSWORD: secret
+      MYSQL_ROOT_PASSWORD: rootsecret
+    volumes:
+      - bds-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-uroot', '-prootsecret']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [bds-network]
+
+  bds-redis:
+    image: redis:7-alpine
+    container_name: bds-redis
+    ports:
+      - '6379:6379'
+    volumes:
+      - bds-redis-data:/data
+    networks: [bds-network]
+
+  # Bắt email gửi ra ở môi trường dev (thông báo duyệt/từ chối tin).
+  bds-mailpit:
+    image: axllent/mailpit:latest
+    container_name: bds-mailpit
+    ports:
+      - '1025:1025'
+      - '8025:8025'
+    networks: [bds-network]
+
+volumes:
+  bds-mysql-data:
+  bds-redis-data:
+
+networks:
+  bds-network:
+    driver: bridge

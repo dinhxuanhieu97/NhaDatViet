@@ -1,0 +1,110 @@
+name: BDS CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: bds-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bds-api-test:
+    name: bds-api — Lint & Test
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_DATABASE: bds_test
+          MYSQL_ROOT_PASSWORD: rootsecret
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -uroot -prootsecret"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+
+    defaults:
+      run:
+        working-directory: bds-api
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cài PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, pdo_mysql, gd, intl, zip, bcmath, exif, redis
+          coverage: none
+
+      - name: Cache Composer
+        uses: actions/cache@v4
+        with:
+          path: bds-api/vendor
+          key: bds-composer-${{ hashFiles('bds-api/composer.lock') }}
+          restore-keys: bds-composer-
+
+      - name: Cài dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Chuẩn bị môi trường
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      - name: Kiểm tra code style (Pint)
+        run: ./vendor/bin/pint --test
+
+      - name: Chạy migration trên MySQL
+        env:
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_DATABASE: bds_test
+          DB_USERNAME: root
+          DB_PASSWORD: rootsecret
+        run: php artisan migrate --force
+
+      # Test chạy trên SQLite in-memory (nhanh); migration trên MySQL ở bước trên
+      # đảm bảo schema tương thích với DB production.
+      - name: Chạy test
+        run: php artisan test
+
+  bds-web-build:
+    name: bds-web — Lint, Typecheck & Build
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: bds-web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: bds-web/package-lock.json
+
+      - name: Cài dependencies
+        run: npm ci
+
+      - name: Kiểm tra kiểu TypeScript
+        run: npx tsc --noEmit
+
+      - name: Kiểm tra lint
+        run: npx eslint src --max-warnings=0
+
+      - name: Build production
+        env:
+          NEXT_PUBLIC_BDS_API_URL: https://api.example.com/api/v1
+          NEXT_PUBLIC_BDS_SITE_URL: https://example.com
+        run: npm run build
